@@ -1,0 +1,240 @@
+package main
+
+
+import (
+	"fmt"
+	"strconv"
+	"bytes"
+	"encoding/json"
+
+	"github.com/RucBlockchain/goSnowFlake"
+	"github.com/hyperledger/fabric/core/chaincode/shim"
+	pb "github.com/hyperledger/fabric/protos/peer"
+)
+
+
+// SimpleChaincode example simple Chaincode implementation
+type SimpleChaincode struct {
+}
+
+
+type task struct {
+	ObjectType     string    `json:"objectType"`
+  ID             string    `json:"id"`
+  TaskName       string    `json:"taskName"`
+  Discription    string    `json:"discription"`
+  State          string    `json:"state"`
+}
+
+
+// =====================================
+//      Init initializes chaincode
+// =====================================
+func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface) pb.Response {
+	return shim.Success(nil)
+}
+
+
+// ===================================================================================
+// Main
+// ===================================================================================
+func main() {
+	err := shim.Start(new(SimpleChaincode))
+	if err != nil {
+		fmt.Printf("Error starting Simple chaincode: %s", err)
+	}
+}
+
+
+// =====================================================
+//      Invoke - Our entry point for Invocations
+// =====================================================
+func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
+  function, args := stub.GetFunctionAndParameters()
+  fmt.Println("invoke is running " + function)
+
+  if function == "addTask" {
+		return t.addTask(stub, args)
+	} else if function == "queryTask" {
+    return t.queryTask(stub)
+  } else if function == "queryTaskByName" {
+		return t.queryTaskByName(stub, args)
+	} else if function == "queryTaskByState" {
+		return t.queryTaskByState(stub, args)
+	}
+  return shim.Success(nil)
+}
+
+
+// ===================================================
+//      addTask - add tasks from chaincode state
+// ===================================================
+func (t *SimpleChaincode) addTask(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	var idInt int64
+	var idStr string
+
+	//       1          2
+	//"collect_data", "000"
+  if len(args) != 2 {
+    return shim.Error("Incorrect number of arguments. Expecting 2")
+  }
+
+  fmt.Println("- start add task")
+	if len(args[0]) <= 0 {
+		return shim.Error("1st argument must be a non-empty string")
+	}
+	if len(args[1]) <= 0 {
+		return shim.Error("2nd argument must be a non-empty string")
+	}
+
+	iw, err := goSnowFlake.NewIdWorker(1)
+	if err!= nil {
+		fmt.Println(err)
+	}
+
+	if idnum, err := iw.NextId(); err != nil {
+		fmt.Println(err)
+	} else {
+		idInt = idnum
+	}
+
+	objectType := "Task"
+	idStr = strconv.FormatInt(idInt, 10)
+	taskName := args[0]
+  discription := args[1]
+	state := "0"
+
+	// ==== Check if task already exists ====
+	taskAsBytes, err := stub.GetState(idStr)
+	if err != nil {
+		return shim.Error("Failed to get task: " + err.Error())
+	} else if taskAsBytes != nil {
+		fmt.Println("The task already exists")
+		return shim.Error("The task already exists")
+	}
+
+	// ==== Create task object and marshal to JSON ====
+  addTaskJSON := &task{objectType, idStr, taskName, discription, state}
+  taskJSONasBytes, err := json.Marshal(addTaskJSON)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	// ==== Save task to state ====
+  err = stub.PutState(idStr, taskJSONasBytes)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+  fmt.Println("add task successfully", idStr)
+  fmt.Println("- end add task\n")
+	return shim.Success(nil)
+}
+
+
+// ============================================================
+//      queryTask - query all tasks from chaincode state
+// ============================================================
+func (t *SimpleChaincode) queryTask(stub shim.ChaincodeStubInterface) pb.Response {
+
+	fmt.Println("- start query all tasks")
+
+	queryString := fmt.Sprintf("{\"selector\":{\"objectType\":\"Task\"}}")
+	queryResults, err := getResultForQueryString(stub, queryString)
+
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+	fmt.Println("- end query all tasks\n")
+	return shim.Success(queryResults)
+}
+
+
+// ==============================================================================
+//      queryTaskByName - query all tasks from chaincode state by taskName
+// ==============================================================================
+func (t *SimpleChaincode) queryTaskByName(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+
+	//       1
+	//"collect_data"
+	if len(args) < 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1")
+	}
+	fmt.Println("- start query task by name")
+
+	taskName := args[0]
+
+	queryString := fmt.Sprintf("{\"selector\":{\"taskName\":\"%s\"}}", taskName)
+	queryResults, err := getResultForQueryString(stub, queryString)
+
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+	fmt.Println("- end query task by name\n")
+	return shim.Success(queryResults)
+}
+
+
+// ==============================================================================
+//      queryTaskByName - query all tasks from chaincode state by state
+// ==============================================================================
+func (t *SimpleChaincode) queryTaskByState(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+
+	// 1
+	//"0"
+	if len(args) < 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1")
+	}
+	fmt.Println("- start query task by state")
+
+	state := args[0]
+
+	queryString := fmt.Sprintf("{\"selector\":{\"State\":\"%s\"}}", state)
+	queryResults, err := getResultForQueryString(stub, queryString)
+
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+	fmt.Println("- end query task by state\n")
+	return shim.Success(queryResults)
+}
+
+
+// =========================================================================================
+// getQueryResultForQueryString executes the passed in query string.
+// Result set is built and returned as a byte array containing the JSON results.
+// =========================================================================================
+func getResultForQueryString(stub shim.ChaincodeStubInterface, queryString string) ([]byte, error) {
+
+	resultsIterator, err := stub.GetQueryResult(queryString)
+	if err != nil {
+		return nil, err
+	}
+	defer resultsIterator.Close()
+
+	// buffer is a JSON array containing QueryRecords
+	var buffer bytes.Buffer
+	buffer.WriteString("[")
+
+	providerAlreadyWritten := false
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return nil, err
+		}
+		// Add a comma before array members, suppress it for the first array member
+		if providerAlreadyWritten == true {
+			buffer.WriteString(",")
+		}
+
+		buffer.WriteString("\"Record\":")
+		// Record is a JSON object, so we write as-is
+		buffer.WriteString(string(queryResponse.Value))
+		buffer.WriteString("}")
+		providerAlreadyWritten = true
+	}
+	buffer.WriteString("]")
+
+	fmt.Printf("- getResultForQueryString queryResult:\n%s\n", buffer.String())
+	return buffer.Bytes(), nil
+}
