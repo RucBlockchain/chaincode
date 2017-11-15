@@ -4,6 +4,7 @@ package main
 import (
 	"fmt"
 	"bytes"
+	"math"
 	"strconv"
 	"encoding/json"
 
@@ -12,7 +13,7 @@ import (
 )
 
 
-//var ID int = 0
+const MIN = 0.001
 
 
 // SimpleChaincode example simple Chaincode implementation
@@ -29,6 +30,7 @@ func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface) pb.Response {
 
 
 type request struct {
+	Id             string  `json:"id"`
 	ObjectType     string  `json:"objectType"`    //objectType is used to distinguish the various types of objects in state database
 	Requester      string  `json:"requester"`
 	Task           string  `json:"task"`
@@ -39,6 +41,7 @@ type request struct {
 
 
 type response struct {
+	ReqId          string  `json:"reqid"`
 	ObjectType     string  `json:"objectType"`    //objectType is used to distinguish the various types of objects in state database
 	Requester      string  `json:"requester"`
 	Provider       string  `json:"provider"`
@@ -48,6 +51,15 @@ type response struct {
 	Price          float64 `json:"price"`
 }
 
+
+type agreement struct {
+	Requester      string    `json:"requester"`
+	Task           string    `json:"task"`
+	Provider       string    `json:"provider"`
+	ResponseTime   float64   `json:"responseTime"`
+	Throughput     float64   `json:"throughput"`
+	FinalPrice     float64   `json:"finalPrice"`
+}
 
 
 // ===================================================================================
@@ -76,25 +88,27 @@ func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
 		return t.writeResponse(stub, args)
 	} else if function == "readResponse" {
 		return t.readResponse(stub, args)
-	} else if function == "Check" {
-		return t.Check(stub, args)
+	} else if function == "check" {
+		return t.check(stub, args)
 	} else if function == "queryByObjectType" {
     return t.queryByObjectType(stub, args)
+  } else if function == "writeRequestArray" {
+    return t.writeRequestArray(stub, args)
   }
 	return shim.Success(nil)
 }
 
 
-// ===============================================
-//       write request from chaincode state
-// ===============================================
+// ==============================================================
+//       writeRequest - write request from chaincode state
+// ==============================================================
 func (t *SimpleChaincode) writeRequest(stub shim.ChaincodeStubInterface, args []string) pb.Response {
 	var err error
 
-	//   0           1          2      3       4
-	// "u1", "collect_data", "0.31", "6.9", "12.7"
-	if len(args) != 5 {
-		return shim.Error("Incorrect number of arguments. Expecting 5")
+	//   0    1           2          3      4       5
+	//   1, "u1", "collect_data", "0.31", "6.9", "12.7"
+	if len(args) != 6 {
+		return shim.Error("Incorrect number of arguments. Expecting 6")
 	}
 
 	// ==== Input sanitation ====
@@ -114,21 +128,25 @@ func (t *SimpleChaincode) writeRequest(stub shim.ChaincodeStubInterface, args []
 	if len(args[4]) <= 0 {
 		return shim.Error("5th argument must be a non-empty string")
 	}
+	if len(args[5]) <= 0 {
+		return shim.Error("6th argument must be a non-empty string")
+	}
 
-	auctioneer := args[0]
-  task := args[1]
+	id := args[0]
+	auctioneer := args[1]
+  task := args[2]
 
-	responseTime, err := strconv.ParseFloat(args[2], 64)
+	responseTime, err := strconv.ParseFloat(args[3], 64)
 	if err != nil {
 		return shim.Error("2rd argument must be a numeric string")
 	}
 
-	throughput, err := strconv.ParseFloat(args[3], 64)
+	throughput, err := strconv.ParseFloat(args[4], 64)
 	if err != nil {
 		return shim.Error("3rd argument must be a numeric string")
 	}
 
-	budget, err := strconv.ParseFloat(args[4], 64)
+	budget, err := strconv.ParseFloat(args[5], 64)
 	if err != nil {
 		return shim.Error("4rd argument must be a numeric string")
 	}
@@ -136,7 +154,7 @@ func (t *SimpleChaincode) writeRequest(stub shim.ChaincodeStubInterface, args []
 
 	// ==== Create Compositekey ====
 	indexName := "index"
-	IndexKey, err := stub.CreateCompositeKey(indexName, []string{auctioneer, task, args[2], args[3]})
+	IndexKey, err := stub.CreateCompositeKey(indexName, []string{id, auctioneer, task})
 	if err != nil {
 		return shim.Error(err.Error())
 	}
@@ -153,8 +171,8 @@ func (t *SimpleChaincode) writeRequest(stub shim.ChaincodeStubInterface, args []
 	stub.PutState(IndexKey, value)
 
 	// ==== Create request object and marshal to JSON ====
-	request0 := &request{objectType, auctioneer, task, responseTime, throughput, budget}
-	requestJSONasBytes, err := json.Marshal(request0)
+	requestJSON := &request{id, objectType, auctioneer, task, responseTime, throughput, budget}
+	requestJSONasBytes, err := json.Marshal(requestJSON)
 	if err != nil {
 		return shim.Error(err.Error())
 	}
@@ -166,21 +184,101 @@ func (t *SimpleChaincode) writeRequest(stub shim.ChaincodeStubInterface, args []
 	}
 
 	fmt.Println("write request successfully", auctioneer)
-  fmt.Println("- end write request")
+  fmt.Println("- end write request\n")
 	return shim.Success(nil)
 }
 
 
-// ===============================================
-//       read request from chaincode state
-// ===============================================
+// =============================================================================
+//      writeRequestArray - write all requests to chaincode state together
+// =============================================================================
+func (t *SimpleChaincode) writeRequestArray(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	var i int
+
+	//  0           2          3     4      5       6      7       8
+	//"u1", "collect_data", "0.5", "1.9", "7.3", "0.31", "6.9", "12.7"
+
+	judge := (len(args) - 2)%3
+	if judge != 0 {
+		return shim.Error("Incorrect number of arguments.")
+	}
+
+	fmt.Println("- start write requestArray")
+	requester := args[0]
+	task := args[1]
+	objectType := "request"
+
+	queryString := fmt.Sprintf("{\"selector\":{\"objectType\":\"%s\"}}", objectType)
+	id, err := getCountOfRequests(stub, queryString)
+
+	if err != nil {
+		return shim.Error("Fail to get the counts of requests.")
+	}
+
+	for i = 2; i < len(args); i = i + 3 {
+		id = id + 1
+		idNum := strconv.Itoa(id)
+		responseTime, err := strconv.ParseFloat(args[i], 64)
+		if err != nil {
+			return shim.Error("Argument must be a numeric string")
+		}
+		throughput, err := strconv.ParseFloat(args[i+1], 64)
+		if err != nil {
+			return shim.Error("Argument must be a numeric string")
+		}
+		budget, err := strconv.ParseFloat(args[i+2], 64)
+		if err != nil {
+			return shim.Error("Argument must be a numeric string")
+		}
+
+		// ==== Create Compositekey ====
+		indexName := "index"
+		IndexKey, err := stub.CreateCompositeKey(indexName, []string{idNum, requester, task})
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		value := []byte{0x00}
+
+		// ==== Check if request already exists ====
+		requestAsBytes, err := stub.GetState(IndexKey)
+		if err != nil {
+			return shim.Error("Failed to get request: " + err.Error())
+		} else if requestAsBytes != nil {
+			fmt.Println("The request already exists")
+			return shim.Error("The request already exists")
+		}
+		stub.PutState(IndexKey, value)
+
+		// ==== Create request object and marshal to JSON ====
+		requestJSON := &request{idNum, objectType, requester, task, responseTime, throughput, budget}
+		requestJSONasBytes, err := json.Marshal(requestJSON)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+
+		// === Save request to state ===
+		err = stub.PutState(IndexKey, requestJSONasBytes)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+	}
+
+	fmt.Println("write requestArray successfully", requester)
+  fmt.Println("- end write requestArray\n")
+	return shim.Success(nil)
+}
+
+
+// =============================================================
+//       readRequest - read request from chaincode state
+// =============================================================
 func (t *SimpleChaincode) readRequest(stub shim.ChaincodeStubInterface, args []string) pb.Response {
 	var jsonResp string
 
-	//   0           1          2      3
-	// "u1", "collect_data", "0.31", "6.9"
-	if len(args) != 4 {
-		return shim.Error("Incorrect number of arguments. Expecting 4")
+	//0    1           2
+	//1, "u1", "collect_data"
+	if len(args) != 3 {
+		return shim.Error("Incorrect number of arguments. Expecting 3")
 	}
 
 	fmt.Println("- start read request")
@@ -193,18 +291,14 @@ func (t *SimpleChaincode) readRequest(stub shim.ChaincodeStubInterface, args []s
 	if len(args[2]) <= 0 {
 		return shim.Error("3rd argument must be a non-empty string")
 	}
-	if len(args[3]) <= 0 {
-		return shim.Error("4th argument must be a non-empty string")
-	}
 
-	requester := args[0]
-	task := args[1]
-	responsetime := args[2]
-	throughput := args[3]
+	id := args[0]
+	requester := args[1]
+	task := args[2]
 
 	// ==== Create Compositekey ====
 	indexName := "index"
-	IndexKey, err := stub.CreateCompositeKey(indexName, []string{requester, task, responsetime, throughput})
+	IndexKey, err := stub.CreateCompositeKey(indexName, []string{id, requester, task})
 	if err != nil {
 		return shim.Error(err.Error())
 	}
@@ -218,22 +312,22 @@ func (t *SimpleChaincode) readRequest(stub shim.ChaincodeStubInterface, args []s
 		return shim.Error(jsonResp)
 	}
 
-	fmt.Println("readRequestResults:", requestAsbytes)
-	fmt.Println("- end read request")
+	fmt.Println("readRequestResults:", string(requestAsbytes))
+	fmt.Println("- end read request\n")
 	return shim.Success(requestAsbytes)
 }
 
 
-// ===============================================
-//       write Response from chaincode state
-// ===============================================
+// ================================================================
+//       writeResponse - write Response from chaincode state
+// ================================================================
 func (t *SimpleChaincode) writeResponse(stub shim.ChaincodeStubInterface, args []string) pb.Response {
 	var err error
 
-	//  1     2           3          4      5      6
-	//"u1", "u2", "collect_data", "0.65", "7.5","10.0"
-	if len(args) != 6 {
-		return shim.Error("Incorrect number of arguments. Expecting 6")
+	//0    1     2           3          4      5      6
+	//1, "u1", "u2", "collect_data", "0.65", "7.5","10.0"
+	if len(args) != 7 {
+		return shim.Error("Incorrect number of arguments. Expecting 7")
 	}
 
 	// ==== Input sanitation ====
@@ -256,28 +350,35 @@ func (t *SimpleChaincode) writeResponse(stub shim.ChaincodeStubInterface, args [
 	if len(args[5]) <= 0 {
 		return shim.Error("6th argument must be a non-empty string")
 	}
+	if len(args[6]) <= 0 {
+		return shim.Error("7th argument must be a non-empty string")
+	}
 
-	requester := args[0]
-	provider := args[1]
-  task := args[2]
-	responseTime, err := strconv.ParseFloat(args[3], 64)
+	reqid := args[0]
+	requester := args[1]
+	provider := args[2]
+  task := args[3]
+
+	responseTime, err := strconv.ParseFloat(args[4], 64)
 	if err != nil {
-		return shim.Error("2rd argument must be a numeric string")
+		return shim.Error("5th argument must be a numeric string")
 	}
-	throughput, err := strconv.ParseFloat(args[4], 64)
+
+	throughput, err := strconv.ParseFloat(args[5], 64)
 	if err != nil {
-		return shim.Error("3rd argument must be a numeric string")
+		return shim.Error("6th argument must be a numeric string")
 	}
-	price, err := strconv.ParseFloat(args[5], 64)
+
+	price, err := strconv.ParseFloat(args[6], 64)
 	if err != nil {
-		return shim.Error("4rd argument must be a numeric string")
+		return shim.Error("7th argument must be a numeric string")
 	}
 
 	objectType := "response"
 
 	// ==== create CreateCompositeKey ====
 	indexName := "index"
-	IndexKey, err := stub.CreateCompositeKey(indexName, []string{requester, provider, task, args[3], args[4]})
+	IndexKey, err := stub.CreateCompositeKey(indexName, []string{reqid, requester, provider, task})
 	if err != nil {
 		return shim.Error(err.Error())
 	}
@@ -288,40 +389,40 @@ func (t *SimpleChaincode) writeResponse(stub shim.ChaincodeStubInterface, args [
 	if err != nil {
 		return shim.Error("Failed to get provide: " + err.Error())
 	} else if provideAsBytes != nil {
-		fmt.Println("The provide already exists")
-		return shim.Error("The provide already exists")
+		fmt.Println("The response already exists")
+		return shim.Error("The response already exists")
 	}
 	stub.PutState(IndexKey, value)
 
 	// ==== Create response object and marshal to JSON ====
-	provide0 := &response{objectType, requester, provider, task, responseTime, throughput, price}
-	provideJSONasBytes, err := json.Marshal(provide0)
+	provideJSON := &response{reqid, objectType, requester, provider, task, responseTime, throughput, price}
+	provideJSONasBytes, err := json.Marshal(provideJSON)
 	if err != nil {
 		return shim.Error(err.Error())
 	}
 
-	// === Save response to state ===
+	// ==== Save response to state ====
 	err = stub.PutState(IndexKey, provideJSONasBytes)
 	if err != nil {
 		return shim.Error(err.Error())
 	}
 
 	fmt.Println("write response successfully", provider)
-  fmt.Println("- end write response")
+  fmt.Println("- end write response\n")
 	return shim.Success(nil)
 }
 
 
-// ===============================================
-//       read response from chaincode state
-// ===============================================
+// =============================================================
+//       readResponse - read response from chaincode state
+// =============================================================
 func (t *SimpleChaincode) readResponse(stub shim.ChaincodeStubInterface, args []string) pb.Response {
 	var jsonResp string
 
-	//  1     2           3          4      5
-	//"u1", "u2", "collect_data", "0.65", "7.5"
-	if len(args) != 5 {
-		return shim.Error("Incorrect number of arguments. Expecting 5")
+	// 0    1     2           3
+	// 1, "u1", "u2", "collect_data"
+	if len(args) != 4 {
+		return shim.Error("Incorrect number of arguments. Expecting 4")
 	}
 
 	// ==== Input sanitation ====
@@ -338,13 +439,10 @@ func (t *SimpleChaincode) readResponse(stub shim.ChaincodeStubInterface, args []
 	if len(args[3]) <= 0 {
 		return shim.Error("4th argument must be a non-empty string")
 	}
-	if len(args[4]) <= 0 {
-		return shim.Error("5th argument must be a non-empty string")
-	}
 
 	// ==== Create CreateCompositeKey ====
 	indexName := "index"
-	IndexKey, err := stub.CreateCompositeKey(indexName, []string{args[0], args[1], args[2], args[3], args[4]})
+	IndexKey, err := stub.CreateCompositeKey(indexName, []string{args[0], args[1], args[2], args[3]})
 	if err != nil {
 		return shim.Error(err.Error())
 	}
@@ -359,15 +457,15 @@ func (t *SimpleChaincode) readResponse(stub shim.ChaincodeStubInterface, args []
 		return shim.Error(jsonResp)
 	}
 
-	//fmt.Println("readResponseResults:",shim.Success(responseAsbytes))
-	fmt.Println("- end read response")
+	fmt.Println("readResponseResults:",string(responseAsbytes))
+	fmt.Println("- end read response\n")
 	return shim.Success(responseAsbytes)
 }
 
 
-// =================================================================
-//     query all requests or all responses from chaincode state
-// =================================================================
+// ========================================================================================
+//     queryByObjectType - query all requests or all responses from chaincode state
+// ========================================================================================
 func (t *SimpleChaincode) queryByObjectType(stub shim.ChaincodeStubInterface, args []string) pb.Response {
 
 	//    1
@@ -379,7 +477,7 @@ func (t *SimpleChaincode) queryByObjectType(stub shim.ChaincodeStubInterface, ar
 	objectType := args[0]
 
 	queryString := fmt.Sprintf("{\"selector\":{\"objectType\":\"%s\"}}", objectType)
-	queryResults, err := getQueryResultForQueryString(stub, queryString)
+	queryResults, err := getResultForQueryString(stub, queryString)
 
 	if err != nil {
 		return shim.Error(err.Error())
@@ -388,26 +486,154 @@ func (t *SimpleChaincode) queryByObjectType(stub shim.ChaincodeStubInterface, ar
 }
 
 
-// ===========================================================================
-// Check-check responses that objectType is response and task is collect_data
-// ===========================================================================
-func (t *SimpleChaincode) Check(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+// ===================================================================
+//        Check - check responses that meet all requirements
+// ===================================================================
+func (t *SimpleChaincode) check(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	requestArray := make([]request, 0)
+	responseArray := make([]response, 0)
+	var requ request
+	var requestErr error
+	var responseErr error
+	var i, j, k int
+	var maxQoS float64 = 0
+	var secondLowPrice, leastPrice float64
+	var maxId,minId string
+	var aPrice float64
 
-	//       1
-	//"collect_data"
-	if len(args) < 1 {
-		return shim.Error("Incorrect number of arguments. Expecting 1")
+	var satResponseMap map[string][]response
+	satResponseMap = make(map[string][]response)  //init satResponseMap
+
+	fmt.Println("- start check")
+
+	// ==== Check all requests ====
+	queryRequestString := fmt.Sprintf("{\"selector\":{\"objectType\":\"request\"}}")
+	fmt.Println("queryString:", queryRequestString)
+	requestArray, requestErr = getArrayForRequest(stub, queryRequestString)
+	if requestErr != nil {
+		return shim.Error(requestErr.Error())
 	}
 
-	task := args[0]
+	// ==== Check all responses ====
+	queryResponseString := fmt.Sprintf("{\"selector\":{\"objectType\":\"response\"}}")
+	fmt.Println("queryString:", queryResponseString)
+	responseArray, responseErr = getArrayForResponse(stub, queryResponseString)
+	if responseErr != nil {
+		return shim.Error(responseErr.Error())
+	}
 
-	queryString := fmt.Sprintf("{\"selector\":{\"objectType\":\"response\",\"task\":\"%s\"}}", task)
-	queryResults, err := getQueryResultForQueryString(stub, queryString)
+	// ==== Check satisfactory responses ====
+	for i = 0; i < len(requestArray); i++ {
+		satResponseArray := make([]response, 0)
+		req := requestArray[i]
+		reqid := req.Id
+		for j = 0; j < len(responseArray); j++ {
+			res := responseArray[j]
+			resid := res.ReqId
 
+			condition1 := (reqid == resid)
+			condition2 := math.Max(req.ResponseTime, res.ResponseTime) == req.ResponseTime && math.Abs(req.ResponseTime - res.ResponseTime) > MIN
+			condition3 := math.Max(req.Throughput, res.Throughput) == res.Throughput && math.Abs(res.Throughput - req.Throughput) > MIN
+			condition4 := math.Max(req.Budget, res.Price) == req.Budget && math.Abs(req.Budget - res.Price) > MIN
+
+			if condition1 && condition2 && condition3 && condition4 {
+				satResponseArray = append(satResponseArray, res)
+			}
+		}
+		satResponseMap[reqid] = satResponseArray
+	}
+
+	//==== check results of requests ====
+	for key, value := range satResponseMap {
+		//fmt.Printf("keys:%s, value:%v\n", key, value)
+
+		keyInt, err := strconv.Atoi(key)
+		if err != nil {
+			return shim.Error("Argument must be a numeric string")
+		}
+		if value != nil {
+
+			requ = requestArray[keyInt-1]
+			QoS := requ.ResponseTime + requ.Throughput
+			if maxQoS < QoS {
+				maxQoS = QoS
+				maxId = requ.Id
+			}
+		}
+	}
+
+	satRes := satResponseMap[maxId]
+
+	if len(satRes) == 1 {
+		leastPrice = satRes[0].Price
+		minId = strconv.Itoa(0)
+		aPrice = leastPrice
+	} else {
+		if satRes[0].Price < satRes[1].Price {
+			leastPrice = satRes[0].Price
+			secondLowPrice = satRes[1].Price
+			minId = strconv.Itoa(0)
+		} else {
+			leastPrice = satRes[1].Price
+			secondLowPrice = satRes[0].Price
+			minId = strconv.Itoa(1)
+		}
+		for k = 2; k < len(satRes); k++ {
+			if satRes[k].Price <= leastPrice {
+				temp := leastPrice
+				leastPrice = satRes[k].Price
+				secondLowPrice = temp
+				minId = strconv.Itoa(k)
+			} else if satRes[k].Price > leastPrice && satRes[k].Price <= secondLowPrice {
+				secondLowPrice = satRes[k].Price
+			}
+		}
+		aPrice = secondLowPrice
+	}
+
+	minIdInt,err := strconv.Atoi(minId)
+	if err != nil {
+		return shim.Error("Argument must be a numeric string")
+	}
+
+	resp := responseArray[minIdInt]
+
+	aRequester := requ.Requester
+	aTask := requ.Task
+	aProvider := resp.Provider
+	aResponseTime := resp.ResponseTime
+	aThroughput := resp.Throughput
+
+	indexName := "index"
+	IndexKey, err := stub.CreateCompositeKey(indexName, []string{aRequester, aTask, aProvider})
 	if err != nil {
 		return shim.Error(err.Error())
 	}
-	return shim.Success(queryResults)
+	value := []byte{0x00}
+
+	agreementAsBytes, err := stub.GetState(IndexKey)
+	if err != nil {
+		return shim.Error("Failed to get agreement: " + err.Error())
+	} else if agreementAsBytes != nil {
+		fmt.Println("The response already exists")
+		return shim.Error("The agreement already exists")
+	}
+	stub.PutState(IndexKey, value)
+
+	agreementJSON := &agreement{aRequester, aTask, aProvider, aResponseTime, aThroughput, aPrice}
+	agreementJSONasBytes, err := json.Marshal(agreementJSON)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	// === Save request to state ===
+	err = stub.PutState(IndexKey, agreementJSONasBytes)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	fmt.Println("- end check\n")
+	return shim.Success(agreementJSONasBytes)
 }
 
 
@@ -415,9 +641,7 @@ func (t *SimpleChaincode) Check(stub shim.ChaincodeStubInterface, args []string)
 // getQueryResultForQueryString executes the passed in query string.
 // Result set is built and returned as a byte array containing the JSON results.
 // =========================================================================================
-func getQueryResultForQueryString(stub shim.ChaincodeStubInterface, queryString string) ([]byte, error) {
-
-	fmt.Printf("- getQueryResultForQueryString queryString:\n%s\n", queryString)
+func getResultForQueryString(stub shim.ChaincodeStubInterface, queryString string) ([]byte, error) {
 
 	resultsIterator, err := stub.GetQueryResult(queryString)
 	if err != nil {
@@ -452,6 +676,97 @@ func getQueryResultForQueryString(stub shim.ChaincodeStubInterface, queryString 
 	}
 	buffer.WriteString("]")
 
-	fmt.Printf("- getQueryResultForQueryString queryResult:\n%s\n", buffer.String())
+	fmt.Printf("- getResultForQueryString queryResult:\n%s\n", buffer.String())
 	return buffer.Bytes(), nil
+}
+
+
+// =========================================================================================
+// getArrayForQueryString executes the passed in query string.
+// Result set is built and returned as a request array containing the JSON results.
+// =========================================================================================
+func getArrayForRequest(stub shim.ChaincodeStubInterface, queryString string) ([]request, error) {
+	var req request
+	reqArray := make([]request, 0)
+
+	resultsIterator, err := stub.GetQueryResult(queryString)
+	if err != nil {
+		return reqArray, err
+	}
+	defer resultsIterator.Close()
+
+	fmt.Println("requestArray:" )
+	for resultsIterator.HasNext() {
+		queryRequest, err := resultsIterator.Next()
+		if err != nil {
+			return reqArray, err
+		}
+
+		errResult := json.Unmarshal([]byte(queryRequest.Value), &req)
+		if errResult != nil {
+			return reqArray, errResult
+		}
+
+		reqArray = append(reqArray, req)
+		fmt.Println(string(queryRequest.Value))
+	}
+	return reqArray, nil
+}
+
+
+// =========================================================================================
+// getArrayForQueryString executes the passed in query string.
+// Result set is built and returned as a response array containing the JSON results.
+// =========================================================================================
+func getArrayForResponse(stub shim.ChaincodeStubInterface, queryString string) ([]response, error) {
+	var res response
+	resArray := make([]response, 0)
+
+	resultsIterator, err := stub.GetQueryResult(queryString)
+	if err != nil {
+		return resArray, err
+	}
+	defer resultsIterator.Close()
+
+	fmt.Println("responseArray:" )
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return resArray, err
+		}
+
+		errResult := json.Unmarshal([]byte(queryResponse.Value), &res)
+		if errResult != nil {
+			//jsonResp := "{\"Error\":\"Failed to decode JSON of Key: " + queryResponse.Key + "\"}"
+			return resArray, errResult
+		}
+
+		resArray = append(resArray, res)
+		fmt.Println(string(queryResponse.Value))
+	}
+	return resArray, nil
+}
+
+
+// =========================================================================================
+// getCountOfRequests- Calculate the counts of requests that requester has already written
+// =========================================================================================
+func getCountOfRequests(stub shim.ChaincodeStubInterface, queryString string) (int, error) {
+	var sum int = 0
+
+	idIterator, err := stub.GetQueryResult(queryString)
+	if err != nil {
+		return sum, err
+	}
+	defer idIterator.Close()
+
+	for idIterator.HasNext() {
+		_, err := idIterator.Next()
+		if err != nil {
+			return sum, err
+		}
+		sum = sum + 1
+	}
+
+	return sum, nil
 }
