@@ -24,8 +24,7 @@ type task struct {
 	ObjectType     string    `json:"objectType"`
   ID             string    `json:"id"`
   TaskName       string    `json:"taskName"`
-  Discription    string    `json:"discription"`
-  State          string    `json:"state"`
+  Description    string    `json:"description"`
 }
 
 
@@ -40,13 +39,13 @@ type IdWorker struct {
 
 
 const (
-   twepoch        = int64(1417937700000) // default timestamp 1449473700000
-   DistrictIdBits = uint(5)
-   NodeIdBits     = uint(9)
-   sequenceBits   = uint(10)
+   twepoch            = int64(1417937700000) // default timestamp 1449473700000
+   DistrictIdBits     = uint(5)
+   NodeIdBits         = uint(9)
+   sequenceBits       = uint(10)
 
-   maxNodeId     = -1 ^ (-1 << NodeIdBits)
-   maxDistrictId = -1 ^ (-1 << DistrictIdBits)
+   maxNodeId          = -1 ^ (-1 << NodeIdBits)
+   maxDistrictId      = -1 ^ (-1 << DistrictIdBits)
 
    nodeIdShift        = sequenceBits
    DistrictIdShift    = sequenceBits + NodeIdBits
@@ -88,8 +87,10 @@ func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
     return t.queryTask(stub)
   } else if function == "queryTaskByName" {
 		return t.queryTaskByName(stub, args)
-	} else if function == "queryTaskByState" {
-		return t.queryTaskByState(stub, args)
+	} else if function == "queryTaskByDescription" {
+		return t.queryTaskByDescription(stub, args)
+	} else if function == "getTaskId" {
+		return t.getTaskId(stub)
 	}
   return shim.Success(nil)
 }
@@ -99,13 +100,11 @@ func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
 //      addTask - add tasks from chaincode state
 // ===================================================
 func (t *SimpleChaincode) addTask(stub shim.ChaincodeStubInterface, args []string) pb.Response {
-	var idInt int64
-	var idStr string
 
-	//       1          2
-	//"collect_data", "000"
-  if len(args) != 2 {
-    return shim.Error("Incorrect number of arguments. Expecting 2")
+	//     0           1          2
+	//"$taskID" "collect_data", "000"
+  if len(args) != 3 {
+    return shim.Error("Incorrect number of arguments. Expecting 3")
   }
 
   fmt.Println("- start add task")
@@ -115,26 +114,17 @@ func (t *SimpleChaincode) addTask(stub shim.ChaincodeStubInterface, args []strin
 	if len(args[1]) <= 0 {
 		return shim.Error("2nd argument must be a non-empty string")
 	}
-
-	iw, err := NewIdWorker(1)
-	if err!= nil {
-		fmt.Println(err)
-	}
-
-	if idnum, err := iw.NextId(); err != nil {
-		fmt.Println(err)
-	} else {
-		idInt = idnum
+	if len(args[1]) <= 0 {
+		return shim.Error("2nd argument must be a non-empty string")
 	}
 
 	objectType := "Task"
-	idStr = strconv.FormatInt(idInt, 10)
-	taskName := args[0]
-  discription := args[1]
-	state := "0"
+	taskId := args[0]
+	taskName := args[1]
+  description := args[2]
 
 	// ==== Check if task already exists ====
-	taskAsBytes, err := stub.GetState(idStr)
+	taskAsBytes, err := stub.GetState(taskId)
 	if err != nil {
 		return shim.Error("Failed to get task: " + err.Error())
 	} else if taskAsBytes != nil {
@@ -143,23 +133,41 @@ func (t *SimpleChaincode) addTask(stub shim.ChaincodeStubInterface, args []strin
 	}
 
 	// ==== Create task object and marshal to JSON ====
-  addTaskJSON := &task{objectType, idStr, taskName, discription, state}
+  addTaskJSON := &task{objectType, taskId, taskName, description}
   taskJSONasBytes, err := json.Marshal(addTaskJSON)
 	if err != nil {
 		return shim.Error(err.Error())
 	}
 
 	// ==== Save task to state ====
-  err = stub.PutState(idStr, taskJSONasBytes)
+  err = stub.PutState(taskId, taskJSONasBytes)
 	if err != nil {
 		return shim.Error(err.Error())
 	}
 
-	idByte := []byte(idStr)
+	idByte := []byte(taskId)
 
-  fmt.Println("add task successfully", idStr)
+  fmt.Println("add task successfully", taskId)
   fmt.Println("- end add task\n")
 	return shim.Success(idByte)
+}
+
+
+func (t *SimpleChaincode) getTaskId(stub shim.ChaincodeStubInterface) pb.Response {
+	var idStr string
+
+	iw, err := NewIdWorker(1)
+	if err!= nil {
+		fmt.Println(err)
+	}
+
+	if id, err := iw.NextId(); err != nil {
+		fmt.Println(err)
+	} else {
+		idStr = strconv.FormatInt(id, 10)
+	}
+
+	return shim.Success([]byte(idStr))
 }
 
 
@@ -195,7 +203,7 @@ func (t *SimpleChaincode) queryTaskByName(stub shim.ChaincodeStubInterface, args
 
 	taskName := args[0]
 
-	queryString := fmt.Sprintf("{\"selector\":{\"taskName\":\"%s\"}}", taskName)
+	queryString := fmt.Sprintf("{\"selector\":{\"taskName\":{\"$regex\":\"(?i)%s\"}}}", taskName)
 	queryResults, err := getResultForQueryString(stub, queryString)
 
 	if err != nil {
@@ -206,27 +214,27 @@ func (t *SimpleChaincode) queryTaskByName(stub shim.ChaincodeStubInterface, args
 }
 
 
-// ==============================================================================
-//      queryTaskByName - query all tasks from chaincode state by state
-// ==============================================================================
-func (t *SimpleChaincode) queryTaskByState(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+// ========================================================================================
+//      queryTaskByDescription - query all tasks from chaincode state by description
+// ========================================================================================
+func (t *SimpleChaincode) queryTaskByDescription(stub shim.ChaincodeStubInterface, args []string) pb.Response {
 
-	// 1
-	//"0"
+	//       1
+	//"collect_data"
 	if len(args) < 1 {
 		return shim.Error("Incorrect number of arguments. Expecting 1")
 	}
-	fmt.Println("- start query task by state")
+	fmt.Println("- start query task by description")
 
-	state := args[0]
+	description := args[0]
 
-	queryString := fmt.Sprintf("{\"selector\":{\"State\":\"%s\"}}", state)
+	queryString := fmt.Sprintf("{\"selector\":{\"description\":{\"$regex\":\"(?i)%s\"}}}", description)
 	queryResults, err := getResultForQueryString(stub, queryString)
 
 	if err != nil {
 		return shim.Error(err.Error())
 	}
-	fmt.Println("- end query task by state\n")
+	fmt.Println("- end query task by description\n")
 	return shim.Success(queryResults)
 }
 
@@ -305,7 +313,9 @@ func timeGen() int64 {
 }
 
 
-// tilNextMillis spin wait till next millisecond.
+// ==========================================================
+//      tilNextMillis - spin wait till next millisecond.
+// ==========================================================
 func tilNextMillis(lastTimestamp int64) int64 {
    timestamp := timeGen()
    for timestamp <= lastTimestamp {
@@ -316,7 +326,7 @@ func tilNextMillis(lastTimestamp int64) int64 {
 
 
 // ============================================
-//        NextId - get a snowflake id.
+//      NextId - get a snowflake id.
 // ============================================
 func (id *IdWorker) NextId() (int64, error) {
    id.mutex.Lock()
@@ -339,7 +349,7 @@ func (id *IdWorker) nextid() (int64, error) {
    } else {
       id.sequence = 0
    }
-	 
+
    id.lastTimestamp = timestamp
    return ((timestamp - id.twepoch) << timestampLeftShift) | (id.districtId << DistrictIdShift) | (id.nodeId << nodeIdShift) | id.sequence, nil
 }
