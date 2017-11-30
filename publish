@@ -1,3 +1,4 @@
+
 package main
 
 
@@ -15,8 +16,8 @@ import (
 )
 
 
-// SimpleChaincode example simple Chaincode implementation
-type SimpleChaincode struct {
+// PublishChaincode example simple Chaincode implementation
+type PublishChaincode struct {
 }
 
 
@@ -58,7 +59,7 @@ const (
 // =====================================
 //      Init initializes chaincode
 // =====================================
-func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface) pb.Response {
+func (t *PublishChaincode) Init(stub shim.ChaincodeStubInterface) pb.Response {
 	return shim.Success(nil)
 }
 
@@ -67,9 +68,9 @@ func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface) pb.Response {
 // Main
 // ===================================================================================
 func main() {
-	err := shim.Start(new(SimpleChaincode))
+	err := shim.Start(new(PublishChaincode))
 	if err != nil {
-		fmt.Printf("Error starting Simple chaincode: %s", err)
+		fmt.Printf("Error starting Publish chaincode: %s", err)
 	}
 }
 
@@ -77,7 +78,7 @@ func main() {
 // =====================================================
 //      Invoke - Our entry point for Invocations
 // =====================================================
-func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
+func (t *PublishChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
   function, args := stub.GetFunctionAndParameters()
   fmt.Println("invoke is running " + function)
 
@@ -85,12 +86,14 @@ func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
 		return t.addTask(stub, args)
 	} else if function == "queryTask" {
     return t.queryTask(stub)
-  } else if function == "queryTaskByName" {
+  } else if function == "queryTaskId" {
+		return t.queryTaskId(stub)
+	} else if function == "queryTaskByName" {
 		return t.queryTaskByName(stub, args)
 	} else if function == "queryTaskByDescription" {
 		return t.queryTaskByDescription(stub, args)
-	} else if function == "getTaskId" {
-		return t.getTaskId(stub)
+	} else if function == "generateTaskId" {
+		return t.generateTaskId(stub)
 	}
   return shim.Success(nil)
 }
@@ -99,7 +102,7 @@ func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
 // ===================================================
 //      addTask - add tasks from chaincode state
 // ===================================================
-func (t *SimpleChaincode) addTask(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+func (t *PublishChaincode) addTask(stub shim.ChaincodeStubInterface, args []string) pb.Response {
 
 	//     0           1          2
 	//"$taskID" "collect_data", "000"
@@ -153,7 +156,7 @@ func (t *SimpleChaincode) addTask(stub shim.ChaincodeStubInterface, args []strin
 }
 
 
-func (t *SimpleChaincode) getTaskId(stub shim.ChaincodeStubInterface) pb.Response {
+func (t *PublishChaincode) generateTaskId(stub shim.ChaincodeStubInterface) pb.Response {
 	var idStr string
 
 	iw, err := NewIdWorker(1)
@@ -174,7 +177,7 @@ func (t *SimpleChaincode) getTaskId(stub shim.ChaincodeStubInterface) pb.Respons
 // ============================================================
 //      queryTask - query all tasks from chaincode state
 // ============================================================
-func (t *SimpleChaincode) queryTask(stub shim.ChaincodeStubInterface) pb.Response {
+func (t *PublishChaincode) queryTask(stub shim.ChaincodeStubInterface) pb.Response {
 
 	fmt.Println("- start query all tasks")
 
@@ -184,15 +187,43 @@ func (t *SimpleChaincode) queryTask(stub shim.ChaincodeStubInterface) pb.Respons
 	if err != nil {
 		return shim.Error(err.Error())
 	}
+
 	fmt.Println("- end query all tasks\n")
 	return shim.Success(queryResults)
+}
+
+
+// ================================================================
+//      queryTaskId - query all task ids from chaincode state
+// ================================================================
+func (t *PublishChaincode) queryTaskId(stub shim.ChaincodeStubInterface) pb.Response {
+	idArray := make([]string, 0)
+
+	fmt.Println("- start query all task ids")
+
+	queryString := fmt.Sprintf("{\"selector\":{\"objectType\":\"Task\"}}")
+	taskArray, err := getArrayForTask(stub, queryString)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	fmt.Println("len:",len(taskArray))
+
+	for i := 0; i < len(taskArray); i++ {
+		//idByte := []byte(taskArray[i].ID)
+		idArray = append(idArray, taskArray[i].ID)
+	}
+
+	fmt.Println("idArray:",idArray)
+	fmt.Println("- end query all task ids\n")
+	return shim.Success(nil)
 }
 
 
 // ==============================================================================
 //      queryTaskByName - query all tasks from chaincode state by taskName
 // ==============================================================================
-func (t *SimpleChaincode) queryTaskByName(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+func (t *PublishChaincode) queryTaskByName(stub shim.ChaincodeStubInterface, args []string) pb.Response {
 
 	//       1
 	//"collect_data"
@@ -217,10 +248,10 @@ func (t *SimpleChaincode) queryTaskByName(stub shim.ChaincodeStubInterface, args
 // ========================================================================================
 //      queryTaskByDescription - query all tasks from chaincode state by description
 // ========================================================================================
-func (t *SimpleChaincode) queryTaskByDescription(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+func (t *PublishChaincode) queryTaskByDescription(stub shim.ChaincodeStubInterface, args []string) pb.Response {
 
-	//       1
-	//"collect_data"
+	//  1
+	//"000"
 	if len(args) < 1 {
 		return shim.Error("Incorrect number of arguments. Expecting 1")
 	}
@@ -276,6 +307,39 @@ func getResultForQueryString(stub shim.ChaincodeStubInterface, queryString strin
 
 	fmt.Printf("- getResultForQueryString queryResult:\n%s\n", buffer.String())
 	return buffer.Bytes(), nil
+}
+
+
+// =========================================================================================
+// getArrayForTask executes the passed in query string.
+// Result set is built and returned as a request array containing the JSON results.
+// =========================================================================================
+func getArrayForTask(stub shim.ChaincodeStubInterface, queryString string) ([]task, error) {
+	var tas task
+	taskArray := make([]task, 0)
+
+	resultsIterator, err := stub.GetQueryResult(queryString)
+	if err != nil {
+		return taskArray, err
+	}
+	defer resultsIterator.Close()
+
+	fmt.Println("taskArray:" )
+	for resultsIterator.HasNext() {
+		queryTask, err := resultsIterator.Next()
+		if err != nil {
+			return taskArray, err
+		}
+
+		errResult := json.Unmarshal([]byte(queryTask.Value), &tas)
+		if errResult != nil {
+			return taskArray, errResult
+		}
+
+		taskArray = append(taskArray, tas)
+		fmt.Println(string(queryTask.Value))
+	}
+	return taskArray, nil
 }
 
 
