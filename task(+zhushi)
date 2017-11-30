@@ -1,0 +1,1075 @@
+
+package main
+
+
+import (
+	"fmt"
+	"bytes"
+	"math"
+	"strconv"
+	"encoding/json"
+
+	"github.com/hyperledger/fabric/core/chaincode/shim"
+	pb "github.com/hyperledger/fabric/protos/peer"
+)
+
+
+const MIN = 0.001
+
+
+// TaskChaincode example simple Chaincode implementation
+type TaskChaincode struct {
+}
+
+
+// =======================================
+//      Init - initializes chaincode
+// =======================================
+func (t *TaskChaincode) Init(stub shim.ChaincodeStubInterface) pb.Response {
+	fmt.Println("- start Init")
+	var err error
+	_, args := stub.GetFunctionAndParameters()
+
+	//    0
+	//"$taskId"
+	/*if len(args) != 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1")
+	}*/
+
+	taskId := args[0]
+	state := "instantiation"
+
+	// ==== Save task state ====
+	err = stub.PutState(taskId, []byte(state))
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	fmt.Println("Current State is:", state)
+	fmt.Println("- end Init\n")
+	return shim.Success(nil)
+}
+
+
+type request struct {
+	Id             string  `json:"id"`
+	ObjectType     string  `json:"objectType"`    //objectType is used to distinguish the various types of objects in state database
+	Requester      string  `json:"requester"`
+	Task           string  `json:"task"`
+	ResponseTime   float64 `json:"responseTime"`
+	Throughput     float64 `json:"throughput"`
+	Budget         float64 `json:"budget"`
+}
+
+
+type response struct {
+	ReqId          string  `json:"reqid"`
+	ObjectType     string  `json:"objectType"`    //objectType is used to distinguish the various types of objects in state database
+	Requester      string  `json:"requester"`
+	Provider       string  `json:"provider"`
+	Task           string  `json:"task"`
+	ResponseTime   float64 `json:"responseTime"`
+	Throughput     float64 `json:"throughput"`
+	Price          float64 `json:"price"`
+}
+
+
+type agreement struct {
+	Requester      string    `json:"requester"`
+	Task           string    `json:"task"`
+	Provider       string    `json:"provider"`
+	ObjectType     string    `json:"objectType"`    //objectType is used to distinguish the various types of objects in state database
+	ResponseTime   float64   `json:"responseTime"`
+	Throughput     float64   `json:"throughput"`
+	FinalPrice     float64   `json:"finalPrice"`
+}
+
+
+// ==============
+//      Main
+// ==============
+func main() {
+	err := shim.Start(new(TaskChaincode))
+	if err != nil {
+		fmt.Printf("Error starting Task chaincode: %s", err)
+	}
+}
+
+
+// =====================================================
+//      Invoke - Our entry point for Invocations
+// =====================================================
+func (t *TaskChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
+	function, args := stub.GetFunctionAndParameters()
+	fmt.Println("invoke is running " + function)
+
+	if function == "writeRequest" {
+		return t.writeRequest(stub, args)
+	} else if function == "writeRequestArray" {
+    return t.writeRequestArray(stub, args)
+  } else if function == "changeStateToWait" {
+		return t.changeStateToWait(stub, args)
+	} else if function == "readRequest" {
+		return t.readRequest(stub, args)
+	} else if function == "writeResponse" {
+		return t.writeResponse(stub, args)
+	} else if function == "readResponse" {
+		return t.readResponse(stub, args)
+	} else if function == "queryByObjectType" {
+    return t.queryByObjectType(stub, args)
+  } else if function == "check" {
+		return t.check(stub, args)
+	} else if function == "readState" {
+		return t.readState(stub, args)
+	} 
+	return shim.Success(nil)
+}
+
+
+// ==============================================================
+//       writeRequest - write request from chaincode state
+// ==============================================================
+func (t *TaskChaincode) writeRequest(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+
+	// 0    1       2         3      4       5
+	// 1, "u1", "$taskId", "0.31", "6.9", "12.7"
+	/*if len(args) != 6 {
+		return shim.Error("Incorrect number of arguments. Expecting 6")
+	}*/
+
+	// ==== get current state of task ====
+	stateAsByte, err := stub.GetState(args[2])
+	if err != nil {
+		fmt.Println("Failed to read state!")
+	}
+	state := string(stateAsByte)
+
+	if state != "instantiation" && state != "rejection" {
+		fmt.Println("Current state is " + state + ", stop writeRequest! You can write request only state is instantiation or rejection!\n")
+		return shim.Error("Can't write request. Current state is " + state + ", you can write request only state is instantiation or rejection!")
+	}
+
+	fmt.Println("Current state is " + state + ", continue......")
+
+	// ==== Input sanitation ====
+	fmt.Println("- start write request")
+	if len(args[0]) <= 0 {
+		return shim.Error("1st argument must be a non-empty string")
+	}
+	if len(args[1]) <= 0 {
+		return shim.Error("2nd argument must be a non-empty string")
+	}
+	if len(args[2]) <= 0 {
+		return shim.Error("3rd argument must be a non-empty string")
+	}
+	if len(args[3]) <= 0 {
+		return shim.Error("4th argument must be a non-empty string")
+	}
+	if len(args[4]) <= 0 {
+		return shim.Error("5th argument must be a non-empty string")
+	}
+	if len(args[5]) <= 0 {
+		return shim.Error("6th argument must be a non-empty string")
+	}
+
+	objectType := "request"
+	id := args[0]
+	auctioneer := args[1]
+	task := args[2]
+
+	responseTime, err := strconv.ParseFloat(args[3], 64)
+	if err != nil {
+		return shim.Error("Failed to convert the 4th argument into type float64.")
+	}
+
+	throughput, err := strconv.ParseFloat(args[4], 64)
+	if err != nil {
+		return shim.Error("Failed to convert the 5th argument into type float64.")
+	}
+
+	budget, err := strconv.ParseFloat(args[5], 64)
+	if err != nil {
+		return shim.Error("Failed to convert the 6th argument into type float64.")
+	}
+
+	// ==== Create Compositekey ====
+	indexName := "index"
+	IndexKey, err := stub.CreateCompositeKey(indexName, []string{id, auctioneer, task})
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+	value := []byte{0x00}
+
+	// ==== Check if request already exists ====
+	requestAsBytes, err := stub.GetState(IndexKey)
+	if err != nil {
+		return shim.Error("Failed to get request: " + err.Error())
+	} else if requestAsBytes != nil {
+		fmt.Println("The request already exists")
+		return shim.Error("The request already exists")
+	}
+	stub.PutState(IndexKey, value)    // Save index entry to state.
+
+	// ==== Create request object and marshal to JSON ====
+	requestJSON := &request{id, objectType, auctioneer, task, responseTime, throughput, budget}
+	requestJSONasBytes, err := json.Marshal(requestJSON)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	// ==== Save request to state ====
+	err = stub.PutState(IndexKey, requestJSONasBytes)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	fmt.Println("write request successfully", auctioneer)
+	fmt.Println("- end write request\n")
+	return shim.Success(nil)
+}
+
+
+// =============================================================================
+//      writeRequestArray - write all requests to chaincode state together
+// =============================================================================
+func (t *TaskChaincode) writeRequestArray(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	var i int
+
+	//   0       1         2     3      4       5      6       7
+	// "u1", "$taskId", "0.5", "1.9", "7.3", "0.31", "6.9", "12.7"
+	/*judge := (len(args) - 2)%3
+	if judge != 0 {
+		return shim.Error("Incorrect number of arguments.")
+	}*/
+
+	// ==== get current state of task ====
+	stateAsByte, err := stub.GetState(args[1])
+	if err != nil {
+		fmt.Println("Failed to read state!")
+	}
+	state := string(stateAsByte)
+
+	if state != "instantiation" && state != "rejection" {
+		fmt.Println("Current state is " + state + ", stop writeRequestArray! You can only write requestArray only state is instantiation or rejection!\n")
+		return shim.Error("Can't to write request. Current state is " + state + ", you can write requestArray only state is instantiation or rejection!")
+	}
+
+	fmt.Println("State is " + state + ", continue......")
+	fmt.Println("- start write requestArray")
+
+	requester := args[0]
+	task := args[1]
+	objectType := "request"
+
+	queryString := fmt.Sprintf("{\"selector\":{\"objectType\":\"%s\"}}", objectType)
+	id, err := getCountOfRequests(stub, queryString)
+	if err != nil {
+		return shim.Error("Fail to get the counts of requests.")
+	}
+
+	for i = 2; i < len(args); i = i + 3 {
+		id = id + 1
+		idNum := strconv.Itoa(id)
+		responseTime, err := strconv.ParseFloat(args[i], 64)
+		if err != nil {
+			return shim.Error("Argument must be a numeric string")
+		}
+		throughput, err := strconv.ParseFloat(args[i+1], 64)
+		if err != nil {
+			return shim.Error("Argument must be a numeric string")
+		}
+		budget, err := strconv.ParseFloat(args[i+2], 64)
+		if err != nil {
+			return shim.Error("Argument must be a numeric string")
+		}
+
+		// ==== Create Compositekey ====
+		indexName := "index"
+		IndexKey, err := stub.CreateCompositeKey(indexName, []string{idNum, requester, task})
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		value := []byte{0x00}
+
+		// ==== Check if request already exists ====
+		requestAsBytes, err := stub.GetState(IndexKey)
+		if err != nil {
+			return shim.Error("Failed to get request: " + err.Error())
+		} else if requestAsBytes != nil {
+			fmt.Println("The request already exists")
+			return shim.Error("The request already exists")
+		}
+		stub.PutState(IndexKey, value)    // Save index entry to state.
+
+		// ==== Create request object and marshal to JSON ====
+		requestJSON := &request{idNum, objectType, requester, task, responseTime, throughput, budget}
+		requestJSONasBytes, err := json.Marshal(requestJSON)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+
+		// ==== Save request to state ====
+		err = stub.PutState(IndexKey, requestJSONasBytes)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+	}
+
+	fmt.Println("write requestArray successfully", requester)
+	fmt.Println("- end write requestArray\n")
+	return shim.Success(nil)
+}
+
+
+// =============================================================
+//       readRequest - read request from chaincode state
+// =============================================================
+func (t *TaskChaincode) readRequest(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	var jsonResp string
+
+	// ==== get current state of task ====
+	stateAsByte, err := stub.GetState(args[2])
+	if err != nil {
+		fmt.Println("Failed to read state!")
+	}
+	state := string(stateAsByte)
+
+	if state != "wait" {
+		fmt.Println("Current state is " + state + ", stop read! You can only read request only state is wait!\n")
+		return shim.Error("Can't read request. Current state is " + state + ", you can read request only state is wait!")
+	}
+
+	fmt.Println("Current state is " + state + ", continue......")
+
+	// 0    1       2
+	// 1, "u1", "$taskId"
+	/*if len(args) != 3 {
+		return shim.Error("Incorrect number of arguments. Expecting 3")
+	}*/
+
+	fmt.Println("- start read request")
+	if len(args[0]) <= 0 {
+		return shim.Error("1st argument must be a non-empty string")
+	}
+	if len(args[1]) <= 0 {
+		return shim.Error("2nd argument must be a non-empty string")
+	}
+	if len(args[2]) <= 0 {
+		return shim.Error("3rd argument must be a non-empty string")
+	}
+
+	id := args[0]
+	requester := args[1]
+	task := args[2]
+
+	// ==== Create Compositekey ====
+	indexName := "index"
+	IndexKey, err := stub.CreateCompositeKey(indexName, []string{id, requester, task})
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	// ==== Check if request exists ====
+	requestAsbytes, err := stub.GetState(IndexKey)
+	if err != nil {
+		jsonResp = "{\"Error\":\"Failed to get state for request\"}"
+		return shim.Error(jsonResp)
+	} else if requestAsbytes == nil {
+		jsonResp = "{\"Error\":\"Agenttask does not exist\"}"
+		return shim.Error(jsonResp)
+	}
+
+	fmt.Println("readRequestResults:", string(requestAsbytes))
+	fmt.Println("- end read request\n")
+	return shim.Success(requestAsbytes)
+}
+
+
+// ================================================================
+//       writeResponse - write response from chaincode state
+// ================================================================
+func (t *TaskChaincode) writeResponse(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+
+	// ==== get current state of task ====
+	stateAsByte, err := stub.GetState(args[3])
+	if err != nil {
+		fmt.Println("Failed to read state!")
+	}
+	state := string(stateAsByte)
+
+	if state != "wait" {
+		fmt.Println("Current state is " + state + ", stop writeResponse! You can only write response only state is wait!\n")
+		return shim.Error("Can't to write response. Current state is " + state + ", you can write response only state is wait!")
+	}
+
+	fmt.Println("Current state is " + state + ", continue......")
+
+	// 0    1     2       3         4      5      6
+	// 1, "u1", "s1", "$taskId", "0.65", "7.5","10.0"
+	/*if len(args) != 7 {
+		return shim.Error("Incorrect number of arguments. Expecting 7")
+	}*/
+
+	// ==== Input sanitation ====
+	fmt.Println("- start write response")
+	if len(args[0]) <= 0 {
+		return shim.Error("1st argument must be a non-empty string")
+	}
+	if len(args[1]) <= 0 {
+		return shim.Error("2nd argument must be a non-empty string")
+	}
+	if len(args[2]) <= 0 {
+		return shim.Error("3rd argument must be a non-empty string")
+	}
+	if len(args[3]) <= 0 {
+		return shim.Error("4th argument must be a non-empty string")
+	}
+	if len(args[4]) <= 0 {
+		return shim.Error("5th argument must be a non-empty string")
+	}
+	if len(args[5]) <= 0 {
+		return shim.Error("6th argument must be a non-empty string")
+	}
+	if len(args[6]) <= 0 {
+		return shim.Error("7th argument must be a non-empty string")
+	}
+
+	reqid := args[0]
+	requester := args[1]
+	provider := args[2]
+	task := args[3]
+
+	responseTime, err := strconv.ParseFloat(args[4], 64)
+	if err != nil {
+		return shim.Error("Failed to convert the 5th argument into type float64")
+	}
+
+	throughput, err := strconv.ParseFloat(args[5], 64)
+	if err != nil {
+		return shim.Error("Failed to convert the 6th argument into type float64")
+	}
+
+	price, err := strconv.ParseFloat(args[6], 64)
+	if err != nil {
+		return shim.Error("Failed to convert the 7th argument into type float64")
+	}
+
+	objectType := "response"
+
+	// ==== create CreateCompositeKey ====
+	indexName := "index"
+	IndexKey, err := stub.CreateCompositeKey(indexName, []string{reqid, requester, provider, task})
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+	value := []byte{0x00}
+
+	// ==== Check if response already exists ====
+	provideAsBytes, err := stub.GetState(IndexKey)
+	if err != nil {
+		return shim.Error("Failed to get response: " + err.Error())
+	} else if provideAsBytes != nil {
+		fmt.Println("The response already exists")
+		return shim.Error("The response already exists")
+	}
+	stub.PutState(IndexKey, value)    // Save index entry to state.
+
+	// ==== Create response object and marshal to JSON ====
+	provideJSON := &response{reqid, objectType, requester, provider, task, responseTime, throughput, price}
+	provideJSONasBytes, err := json.Marshal(provideJSON)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	// ==== Save response to state ====
+	err = stub.PutState(IndexKey, provideJSONasBytes)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	fmt.Println("write response successfully", provider)
+	fmt.Println("- end write response\n")
+	return shim.Success(nil)
+}
+
+
+// =============================================================
+//      readResponse - read response from chaincode state
+// =============================================================
+func (t *TaskChaincode) readResponse(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	var jsonResp string
+
+	// ==== get current state of task ====
+	stateAsByte, err := stub.GetState(args[3])
+	if err != nil {
+		fmt.Println("Failed to read state!")
+	}
+	state := string(stateAsByte)
+
+	if state != "wait" {
+		fmt.Println("Current state is " + state + ", stop readResponse! You can only read response only state is wait!")
+		return shim.Error("Can't to read response. Current state is " + state + ", you can read response only state is wait!")
+	}
+
+	fmt.Println("Current state is " + state + ", continue......")
+
+	// 0    1     2       3
+	// 1, "u1", "s1", "$taskId"
+	/*if len(args) != 4 {
+		return shim.Error("Incorrect number of arguments. Expecting 4")
+	}*/
+
+	// ==== Input sanitation ====
+	fmt.Println("- start read response")
+	if len(args[0]) <= 0 {
+		return shim.Error("1st argument must be a non-empty string")
+	}
+	if len(args[1]) <= 0 {
+		return shim.Error("2nd argument must be a non-empty string")
+	}
+	if len(args[2]) <= 0 {
+		return shim.Error("3rd argument must be a non-empty string")
+	}
+	if len(args[3]) <= 0 {
+		return shim.Error("4th argument must be a non-empty string")
+	}
+
+	// ==== Create CreateCompositeKey ====
+	indexName := "index"
+	IndexKey, err := stub.CreateCompositeKey(indexName, []string{args[0], args[1], args[2], args[3]})
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	// ==== Check if response exists ====
+	responseAsbytes, err := stub.GetState(IndexKey)
+	if err != nil {
+		jsonResp = "{\"Error\":\"Failed to get state for response\"}"
+		return shim.Error(jsonResp)
+	} else if responseAsbytes == nil {
+		jsonResp = "{\"Error\":\"(Response does not exist\"}"
+		return shim.Error(jsonResp)
+	}
+
+	fmt.Println("readResponseResults:",string(responseAsbytes))
+	fmt.Println("- end read response\n")
+	return shim.Success(responseAsbytes)
+}
+
+
+// ==========================================================================================================
+//      queryByObjectType - query all requests or all responses or all agreements from chaincode state
+// ==========================================================================================================
+func (t *TaskChaincode) queryByObjectType(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+
+	//    0
+	//"request"
+	/*if len(args) !=2 {
+		return shim.Error("Incorrect number of arguments. Expecting 2")
+	}*/
+
+	// ==== get current state of task ====
+	stateAsByte, err := stub.GetState(args[0])
+	if err != nil {
+		fmt.Println("Failed to read state!")
+	}
+	state := string(stateAsByte)
+	objectType := args[1]
+
+	if objectType == "request" {
+		if state == "wait" || state == "rejection" {
+
+			fmt.Println("Current state is:" + state + ", continue......")
+			queryString := fmt.Sprintf("{\"selector\":{\"objectType\":\"%s\"}}", objectType)
+			queryResults, err := getResultForQueryString(stub, queryString)
+
+			if err != nil {
+				return shim.Error(err.Error())
+			}
+			return shim.Success(queryResults)
+		}
+
+		fmt.Println("Current state is " + state + ", you can query all requests only state is wait or rejection!\n")
+		return shim.Error("Can't query all requests. Current state is " + state + ", you can read all responses only state is wait or rejection!")
+	}
+
+	if objectType == "response" {
+		if state == "wait" {
+
+			fmt.Println("Current state is:" + state + ", continue......")
+			queryString := fmt.Sprintf("{\"selector\":{\"objectType\":\"%s\"}}", objectType)
+			queryResults, err := getResultForQueryString(stub, queryString)
+
+			if err != nil {
+				return shim.Error(err.Error())
+			}
+			return shim.Success(queryResults)
+		}
+		fmt.Println("Current state is " + state + ", you can query all responses only state is wait!\n")
+		return shim.Error("Can't query all responses. Current state is " + state + ", you can read all responses only state is wait!")
+	}
+
+	if objectType == "agreement" && state == "acception" {
+		fmt.Println("Current state is:" + state + ", continue......")
+		queryString := fmt.Sprintf("{\"selector\":{\"objectType\":\"%s\"}}", objectType)
+		queryResults, err := getResultForQueryString(stub, queryString)
+
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		return shim.Success(queryResults)
+	}
+
+	return shim.Success(nil)
+}
+
+
+// ========================================================================================
+//        Check - check responses that meet all requirements and write into agreement
+// ========================================================================================
+func (t *TaskChaincode) check(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	requestArray := make([]request, 0)
+	responseArray := make([]response, 0)
+	var requ request
+	var requestErr error
+	var responseErr error
+	var i, j, k int
+	var maxQoS float64 = 0
+	var secondLowPrice, lowestPrice float64
+	var maxQoSReqIndex, minPriceResIndex string
+	var reservePrice float64
+	var aFinalPrice float64
+	var agreementNil agreement  //null struct of agreement
+
+	agreementAsBytes, err := json.Marshal(agreementNil)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	var satResponseMap map[string][]response
+	satResponseMap = make(map[string][]response)  //init satResponseMap
+
+	//     0
+	// "$taskId"
+	/*if len(args) < 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1")
+	}*/
+	aTask := args[0]
+
+	stateAsByte, err := stub.GetState(args[0])
+	if err != nil {
+		fmt.Println("Failed to read state!")
+	}
+	state := string(stateAsByte)
+
+	if state != "wait" {
+		fmt.Println("Current state is " + state + ", you can execute check only state is wait!\n")
+		return shim.Error("Can't execute check. Current state is " + state + ", you can execute check only state is wait!")
+	}
+
+	fmt.Println("Current state is " + state + ", continue......")
+	fmt.Println("- start check")
+
+	// ==== Query all requests ====
+	queryRequestString := fmt.Sprintf("{\"selector\":{\"objectType\":\"request\"}}")
+	fmt.Println("queryString:", queryRequestString)
+	requestArray, requestErr = getArrayForRequest(stub, queryRequestString)
+	if requestErr != nil {
+		return shim.Error(requestErr.Error())
+	}
+
+	// ==== Check if requestArray is null ====
+	if len(requestArray) == 0 {
+		fmt.Println("requestArray is null!!!")
+		return shim.Success(agreementAsBytes)
+	}
+
+	// ==== Query all responses ====
+	queryResponseString := fmt.Sprintf("{\"selector\":{\"objectType\":\"response\"}}")
+	fmt.Println("queryString:", queryResponseString)
+	responseArray, responseErr = getArrayForResponse(stub, queryResponseString)
+	if responseErr != nil {
+		return shim.Error(responseErr.Error())
+	}
+
+	// ==== Check if responseArray is null ====
+	if len(responseArray) == 0 {
+		fmt.Println("ResponseArray is null!!!")
+		return shim.Success(agreementAsBytes)
+	}
+
+	// ==== Select all satisfactory responses and write into satResponseArray ====
+	for i = 0; i < len(requestArray); i++ {
+		satResponseArray := make([]response, 0)
+		req := requestArray[i]
+		aTask = req.Task
+		reqid := req.Id
+		for j = 0; j < len(responseArray); j++ {
+			res := responseArray[j]
+			resid := res.ReqId
+
+			condition1 := (reqid == resid)
+			condition2 := math.Max(req.ResponseTime, res.ResponseTime) == req.ResponseTime && math.Abs(req.ResponseTime - res.ResponseTime) > MIN
+			condition3 := math.Max(req.Throughput, res.Throughput) == res.Throughput && math.Abs(res.Throughput - req.Throughput) > MIN
+			condition4 := math.Max(req.Budget, res.Price) == req.Budget && math.Abs(req.Budget - res.Price) > MIN
+
+			if condition1 && condition2 && condition3 && condition4 {
+				satResponseArray = append(satResponseArray, res)
+			}
+		}
+		if len(satResponseArray) != 0 {
+			satResponseMap[reqid] = satResponseArray
+		}
+	}
+
+	// ==== Check if satResponseMap is null ====
+	if len(satResponseMap) <= 0 {
+		state = changeStateToRejection(stub, aTask)
+		fmt.Println("Current state is " + state + ", stop execute check!\n")
+		fmt.Println("No satisfactory response in satResponseMap!!!")
+		return shim.Success(agreementAsBytes)
+	}
+
+	//==== Range satResponseMap and select final request ====
+	for key := range satResponseMap {
+		keyInt, err := strconv.Atoi(key)
+		if err != nil {
+			return shim.Error("Failed to convert key(type int) into type string!")
+		}
+
+		requ = requestArray[keyInt - 1]
+		QoS := requ.ResponseTime + requ.Throughput
+		if maxQoS < QoS {
+			maxQoS = QoS
+			maxQoSReqIndex = requ.Id
+			reservePrice = requ.Budget
+		}
+	}
+	satResArray := satResponseMap[maxQoSReqIndex]
+
+	// ==== Select final agreement price ====
+	if len(satResArray) == 1 {
+		minPriceResIndex = strconv.Itoa(0)
+		aFinalPrice = reservePrice
+	} else {
+		if satResArray[0].Price <= satResArray[1].Price {
+			lowestPrice = satResArray[0].Price
+			secondLowPrice = satResArray[1].Price
+			minPriceResIndex = strconv.Itoa(0)
+		} else {
+			lowestPrice = satResArray[1].Price
+			secondLowPrice = satResArray[0].Price
+			minPriceResIndex = strconv.Itoa(1)
+		}
+		for k = 2; k < len(satResArray); k++ {
+			if satResArray[k].Price <= lowestPrice {
+				secondLowPrice = lowestPrice
+				lowestPrice = satResArray[k].Price
+				minPriceResIndex = strconv.Itoa(k)
+			} else if satResArray[k].Price > lowestPrice && satResArray[k].Price <= secondLowPrice {
+				secondLowPrice = satResArray[k].Price
+			}
+		}
+		aFinalPrice = secondLowPrice
+	}
+
+	minPriceResIndexInt,err := strconv.Atoi(minPriceResIndex)
+	if err != nil {
+		return shim.Error("Failed to convert minPriceResIndex into type Int")
+	}
+
+	resp := satResArray[minPriceResIndexInt]
+
+	aRequester := requ.Requester
+	aProvider := resp.Provider
+	aObjectType := "agreement"
+	aResponseTime := resp.ResponseTime
+	aThroughput := resp.Throughput
+
+	// ==== Create CreateCompositeKey ====
+	indexName := "index"
+	IndexKey, err := stub.CreateCompositeKey(indexName, []string{aRequester, aTask, aProvider})
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+	value := []byte{0x00}
+
+	// ==== Check if agreement already exists ====
+	agreementAsBytes, err = stub.GetState(IndexKey)
+	if err != nil {
+		return shim.Error("Failed to get agreement: " + err.Error())
+	} else if agreementAsBytes != nil {
+		fmt.Println("The response already exists")
+		return shim.Error("The agreement already exists")
+	}
+	stub.PutState(IndexKey, value)  // Save index entry to state.
+
+	agreement := &agreement{aRequester, aTask, aProvider, aObjectType, aResponseTime, aThroughput, aFinalPrice}
+	agreementJSONasBytes, err := json.Marshal(agreement)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	// ==== Save request to state ====
+	err = stub.PutState(IndexKey, agreementJSONasBytes)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	// ==== Query agreement ====
+	queryAgreementString := fmt.Sprintf("{\"selector\":{\"requester\":\"%s\",\"task\":\"%s\",\"provider\":\"%s\"}}", aRequester, aTask, aProvider)
+	fmt.Println("queryString:", queryAgreementString)
+	agreementRes, agreementErr := getResultForQueryString(stub, queryAgreementString)
+	if agreementErr != nil {
+		return shim.Error(agreementErr.Error())
+	}
+	if agreementRes != nil {
+		state = changeStateToAcception(stub, aTask)
+	}
+
+	fmt.Println("Current state is:", state)
+	fmt.Println("- end check\n")
+	return shim.Success(agreementJSONasBytes)
+}
+
+
+// =======================================
+//      readState - read task state
+// =======================================
+func (t *TaskChaincode) readState(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+
+	fmt.Println("- start readState")
+	/*if len(args) != 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1")
+	}*/
+
+	taskId := args[0]
+	state, err := stub.GetState(taskId)
+	if err != nil {
+		fmt.Println("Failed to read state!")
+	}
+
+	fmt.Println("Current state is:", string(state))
+	fmt.Println("- end readState\n")
+	return shim.Success(state)
+}
+
+
+// =============================================================================
+//      changeStateToWait - change task's state from instantiation to wait
+// =============================================================================
+func (t *TaskChaincode) changeStateToWait(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	var err error
+	var stateAsByte []byte
+
+	//    0
+	//"$taskId"
+	fmt.Println("- start changeStateToWait")
+	/*if len(args) != 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1")
+	}*/
+	taskId := args[0]
+
+	stateAsByte, err = stub.GetState(taskId)
+	if err != nil {
+		return shim.Error("Failed to get state")
+	}
+
+	state := string(stateAsByte)
+	state = "wait"
+
+	err = stub.PutState(string(taskId), []byte(state))
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	fmt.Println("- end changeStateToWait\n")
+	return shim.Success(nil)
+}
+
+
+// =========================================================================================
+// getQueryResultForQueryString executes the passed in query string.
+// Result set is built and returned as a byte array containing the JSON results.
+// =========================================================================================
+func getResultForQueryString(stub shim.ChaincodeStubInterface, queryString string) ([]byte, error) {
+
+	resultsIterator, err := stub.GetQueryResult(queryString)
+	if err != nil {
+		return nil, err
+	}
+	defer resultsIterator.Close()
+
+	// buffer is a JSON array containing QueryRecords
+	var buffer bytes.Buffer
+	buffer.WriteString("[")
+
+	providerAlreadyWritten := false
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return nil, err
+		}
+		// Add a comma before array members, suppress it for the first array member
+		if providerAlreadyWritten == true {
+			buffer.WriteString(",")
+		}
+		buffer.WriteString("{\"Key\":")
+		buffer.WriteString("\"")
+		buffer.WriteString(queryResponse.Key)
+		buffer.WriteString("\"")
+
+		buffer.WriteString(", \"Record\":")
+		// Record is a JSON object, so we write as-is
+		buffer.WriteString(string(queryResponse.Value))
+		buffer.WriteString("}")
+		providerAlreadyWritten = true
+	}
+	buffer.WriteString("]\n")
+
+	fmt.Printf("- getResultForQueryString queryResult:\n%s\n", buffer.String())
+	return buffer.Bytes(), nil
+}
+
+
+// =========================================================================================
+// getArrayForRequest executes the passed in query string.
+// Result set is built and returned as a request array containing the JSON results.
+// =========================================================================================
+func getArrayForRequest(stub shim.ChaincodeStubInterface, queryString string) ([]request, error) {
+	var req request
+	reqArray := make([]request, 0)
+
+	resultsIterator, err := stub.GetQueryResult(queryString)
+	if err != nil {
+		return reqArray, err
+	}
+	defer resultsIterator.Close()
+
+	fmt.Println("requestArray:" )
+	for resultsIterator.HasNext() {
+		queryRequest, err := resultsIterator.Next()
+		if err != nil {
+			return reqArray, err
+		}
+
+		errResult := json.Unmarshal([]byte(queryRequest.Value), &req)
+		if errResult != nil {
+			return reqArray, errResult
+		}
+
+		reqArray = append(reqArray, req)
+		fmt.Println(string(queryRequest.Value))
+	}
+	return reqArray, nil
+}
+
+
+// =========================================================================================
+// getArrayForResponse executes the passed in query string.
+// Result set is built and returned as a response array containing the JSON results.
+// =========================================================================================
+func getArrayForResponse(stub shim.ChaincodeStubInterface, queryString string) ([]response, error) {
+	var res response
+	resArray := make([]response, 0)
+
+	resultsIterator, err := stub.GetQueryResult(queryString)
+	if err != nil {
+		return resArray, err
+	}
+	defer resultsIterator.Close()
+
+	fmt.Println("responseArray:" )
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return resArray, err
+		}
+
+		errResult := json.Unmarshal([]byte(queryResponse.Value), &res)
+		if errResult != nil {
+			return resArray, errResult
+		}
+
+		resArray = append(resArray, res)
+		fmt.Println(string(queryResponse.Value))
+	}
+	return resArray, nil
+}
+
+
+// =================================================================================================
+//     getCountOfRequests - Calculate the counts of requests that requester has already written
+// =================================================================================================
+func getCountOfRequests(stub shim.ChaincodeStubInterface, queryString string) (int, error) {
+	var sum int = 0
+
+	idIterator, err := stub.GetQueryResult(queryString)
+	if err != nil {
+		return sum, err
+	}
+	defer idIterator.Close()
+
+	for idIterator.HasNext() {
+		_, err := idIterator.Next()
+		if err != nil {
+			return sum, err
+		}
+		sum = sum + 1
+	}
+
+	return sum, nil
+}
+
+
+// ==============================================================================
+//      changeStateToRejection - change task's state from wait to rejection
+// ==============================================================================
+func changeStateToRejection(stub shim.ChaincodeStubInterface, aTask string) (string) {
+	var err error
+	var stateAsByte []byte
+
+	taskId := aTask
+
+	stateAsByte, err = stub.GetState(taskId)
+	if err != nil {
+		return "0"
+	}
+
+	state := string(stateAsByte)
+	state = "rejection"
+
+	// ==== save task state ====
+	err = stub.PutState(string(taskId), []byte(state))
+	if err != nil {
+		return "0"
+	}
+
+	fmt.Println("State is:", state)
+	return state
+}
+
+
+// ==============================================================================
+//      changeStateToAcception - change task state from wait to acception
+// ==============================================================================
+func changeStateToAcception(stub shim.ChaincodeStubInterface, Task string) (string) {
+	var err error
+	var stateAsByte []byte
+
+	stateAsByte, err = stub.GetState(Task)
+	if err != nil {
+		return "0"
+	}
+
+	state := string(stateAsByte)
+	state = "acception"
+
+	// ==== save task state ====
+	err = stub.PutState(Task, []byte(state))
+	if err != nil {
+		return "0"
+	}
+
+	return state
+}
