@@ -8,6 +8,11 @@ import (
 	"math"
 	"strconv"
 	"encoding/json"
+	"errors"
+	"sync"
+	"time"
+	"io/ioutil"
+	"net/http"
 
 	"github.com/hyperledger/fabric/core/chaincode/shim"
 	pb "github.com/hyperledger/fabric/protos/peer"
@@ -15,6 +20,21 @@ import (
 
 
 const MIN = 0.001
+const (
+   twepoch            = int64(1417937700000) // default timestamp 1449473700000
+   DistrictIdBits     = uint(5)
+   NodeIdBits         = uint(9)
+   sequenceBits       = uint(10)
+
+   maxNodeId          = -1 ^ (-1 << NodeIdBits)
+   maxDistrictId      = -1 ^ (-1 << DistrictIdBits)
+
+   nodeIdShift        = sequenceBits
+   DistrictIdShift    = sequenceBits + NodeIdBits
+   timestampLeftShift = sequenceBits + NodeIdBits + DistrictIdBits
+   sequenceMask       = -1 ^ (-1 << sequenceBits)
+   maxNextIdsNum      = 100
+)
 
 
 // TaskChaincode example simple Chaincode implementation
@@ -48,6 +68,16 @@ func (t *TaskChaincode) Init(stub shim.ChaincodeStubInterface) pb.Response {
 	fmt.Println("Current State is:", state)
 	fmt.Println("- end Init\n")
 	return shim.Success(nil)
+}
+
+
+type IdWorker struct {
+   sequence      int64
+   lastTimestamp int64
+   nodeId        int64
+   twepoch       int64
+   districtId    int64
+   mutex         sync.Mutex
 }
 
 
@@ -121,10 +151,32 @@ func (t *TaskChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
 		return t.check(stub, args)
 	} else if function == "readState" {
 		return t.readState(stub, args)
-	} /*else if function == "iq" {
-		return t.iq(stub, function, args)
-	}*/
+	} else if function == "exeGet" {
+		return t.exeGet(stub)
+	} else if function == "exePost" {
+		return t.exePost(stub)
+	} else if function == "generateRequestId" {
+		return t.generateRequestId(stub)
+	} 
 	return shim.Success(nil)
+}
+
+
+func (t *TaskChaincode) generateRequestId(stub shim.ChaincodeStubInterface) pb.Response {
+	var idStr string
+
+	iw, err := NewIdWorker(1)
+	if err!= nil {
+		fmt.Println(err)
+	}
+
+	if id, err := iw.NextId(); err != nil {
+		fmt.Println(err)
+	} else {
+		idStr = strconv.FormatInt(id, 10)
+	}
+
+	return shim.Success([]byte(idStr))
 }
 
 
@@ -133,8 +185,8 @@ func (t *TaskChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
 // ==============================================================
 func (t *TaskChaincode) writeRequest(stub shim.ChaincodeStubInterface, args []string) pb.Response {
 
-	// 0    1       2         3      4       5
-	// 1, "u1", "$taskId", "0.31", "6.9", "12.7"
+	//       0         1       2         3      4       5
+	// "$requestId", "u1", "$taskId", "0.31", "6.9", "12.7"
 	if len(args) != 6 {
 		return shim.Error("Incorrect number of arguments. Expecting 6")
 	}
@@ -263,15 +315,20 @@ func (t *TaskChaincode) writeRequestArray(stub shim.ChaincodeStubInterface, args
 	task := args[1]
 	objectType := "request"
 
-	queryString := fmt.Sprintf("{\"selector\":{\"objectType\":\"%s\"}}", objectType)
-	id, err := getCountOfRequests(stub, queryString)
-	if err != nil {
-		return shim.Error("Fail to get the counts of requests.")
-	}
-
 	for i = 2; i < len(args); i = i + 3 {
-		id = id + 1
-		idNum := strconv.Itoa(id)
+		var idStr string
+
+		iw, err := NewIdWorker(1)
+		if err!= nil {
+			fmt.Println(err)
+		}
+
+		if id, err := iw.NextId(); err != nil {
+			fmt.Println(err)
+		} else {
+			idStr = strconv.FormatInt(id, 10)
+		}
+
 		responseTime, err := strconv.ParseFloat(args[i], 64)
 		if err != nil {
 			return shim.Error("Argument must be a numeric string")
@@ -287,7 +344,7 @@ func (t *TaskChaincode) writeRequestArray(stub shim.ChaincodeStubInterface, args
 
 		// ==== Create Compositekey ====
 		indexName := "index"
-		IndexKey, err := stub.CreateCompositeKey(indexName, []string{idNum, requester, task})
+		IndexKey, err := stub.CreateCompositeKey(indexName, []string{idStr, requester, task})
 		if err != nil {
 			return shim.Error(err.Error())
 		}
@@ -304,7 +361,7 @@ func (t *TaskChaincode) writeRequestArray(stub shim.ChaincodeStubInterface, args
 		stub.PutState(IndexKey, value)    // Save index entry to state.
 
 		// ==== Create request object and marshal to JSON ====
-		requestJSON := &request{idNum, objectType, requester, task, responseTime, throughput, budget}
+		requestJSON := &request{idStr, objectType, requester, task, responseTime, throughput, budget}
 		requestJSONasBytes, err := json.Marshal(requestJSON)
 		if err != nil {
 			return shim.Error(err.Error())
@@ -343,8 +400,8 @@ func (t *TaskChaincode) readRequest(stub shim.ChaincodeStubInterface, args []str
 
 	fmt.Println("Current state is " + state + ", continue......")
 
-	// 0    1       2
-	// 1, "u1", "$taskId"
+	//       0         1       2
+	// "$requestId", "u1", "$taskId"
 	if len(args) != 3 {
 		return shim.Error("Incorrect number of arguments. Expecting 3")
 	}
@@ -406,8 +463,8 @@ func (t *TaskChaincode) writeResponse(stub shim.ChaincodeStubInterface, args []s
 
 	fmt.Println("Current state is " + state + ", continue......")
 
-	// 0    1     2       3         4      5      6
-	// 1, "u1", "s1", "$taskId", "0.65", "7.5","10.0"
+	//       0         1     2       3         4      5      6
+	// "$requestId", "u1", "s1", "$taskId", "0.65", "7.5","10.0"
 	if len(args) != 7 {
 		return shim.Error("Incorrect number of arguments. Expecting 7")
 	}
@@ -515,8 +572,8 @@ func (t *TaskChaincode) readResponse(stub shim.ChaincodeStubInterface, args []st
 
 	fmt.Println("Current state is " + state + ", continue......")
 
-	// 0    1     2       3
-	// 1, "u1", "s1", "$taskId"
+	//       0         1     2       3
+	// "$requestId", "u1", "s1", "$taskId"
 	if len(args) != 4 {
 		return shim.Error("Incorrect number of arguments. Expecting 4")
 	}
@@ -638,7 +695,8 @@ func (t *TaskChaincode) check(stub shim.ChaincodeStubInterface, args []string) p
 	var i, j, k int
 	var maxQoS float64 = 0
 	var secondLowPrice, lowestPrice float64
-	var maxQoSReqIndex, minPriceResIndex string
+	var maxQoSReqIndex int
+	var minPriceResIndex string
 	var reservePrice float64
 	var aFinalPrice float64
 	var agreementNil agreement  //null struct of agreement
@@ -648,8 +706,8 @@ func (t *TaskChaincode) check(stub shim.ChaincodeStubInterface, args []string) p
 		fmt.Println(err)
 	}
 
-	var satResponseMap map[string][]response
-	satResponseMap = make(map[string][]response)  //init satResponseMap
+	var satResponseMap map[int][]response
+	satResponseMap = make(map[int][]response)  //init satResponseMap
 
 	//     0
 	// "$taskId"
@@ -720,7 +778,7 @@ func (t *TaskChaincode) check(stub shim.ChaincodeStubInterface, args []string) p
 			}
 		}
 		if len(satResponseArray) != 0 {
-			satResponseMap[reqid] = satResponseArray
+			satResponseMap[i + 1] = satResponseArray
 		}
 	}
 
@@ -734,16 +792,11 @@ func (t *TaskChaincode) check(stub shim.ChaincodeStubInterface, args []string) p
 
 	//==== Range satResponseMap and select final request ====
 	for key := range satResponseMap {
-		keyInt, err := strconv.Atoi(key)
-		if err != nil {
-			return shim.Error("Failed to convert key(type int) into type string!")
-		}
-
-		requ = requestArray[keyInt - 1]
+		requ = requestArray[key - 1]
 		QoS := requ.ResponseTime + requ.Throughput
 		if maxQoS < QoS {
 			maxQoS = QoS
-			maxQoSReqIndex = requ.Id
+			maxQoSReqIndex = key
 			reservePrice = requ.Budget
 		}
 	}
@@ -887,6 +940,68 @@ func (t *TaskChaincode) changeStateToWait(stub shim.ChaincodeStubInterface, args
 
 	fmt.Println("- end changeStateToWait\n")
 	return shim.Success(nil)
+}
+
+
+func (t *TaskChaincode) exeGet(stub shim.ChaincodeStubInterface) pb.Response {
+    response, err := http.Get("http://202.112.114.22:8080/tickets/")
+		fmt.Println("response is:", response)
+    if err != nil {
+	    return shim.Error(err.Error())
+    }
+
+    defer response.Body.Close()
+
+    body, _ := ioutil.ReadAll(response.Body)
+    fmt.Println(string(body))
+		return shim.Success([]byte(string(body)))
+}
+
+
+func (t *TaskChaincode) exePost(stub shim.ChaincodeStubInterface) pb.Response {
+	url := "http://202.112.114.22:8080/tickets/addOneTicket"
+	fmt.Println("URL:>", url)
+
+	id := "6"
+	airlines := "Air China"
+	flightno := "AC1234"
+	departure := "beijing"
+	destination := "chengdu"
+	date := "2017-12-06"
+	departuretime := "14:00:00"
+	arrivetime := "16:00:00"
+	duration := "2 hours"
+	price := "900"
+
+	//json序列化
+	post := "{\"id\":\"" + id + "\",\"airlines\":\"" + airlines +
+		"\",\"flightno\":\"" + flightno + "\",\"departure\":\"" + departure +
+		"\",\"destination\":\"" + destination + "\",\"date\":\"" + date +
+		"\",\"departuretime\":\"" + departuretime + "\",\"arrivetime\":\"" + arrivetime +
+		"\",\"duration\":\"" + duration + "\",\"price\":\"" + price + "\"}"
+
+	fmt.Println(url, "post", post)
+
+	var jsonStr = []byte(post)
+	fmt.Println("jsonStr", jsonStr)
+	fmt.Println("new_str", bytes.NewBuffer(jsonStr))
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonStr))
+	// req.Header.Set("X-Custom-Header", "myvalue")
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+			panic(err)
+	}
+	defer resp.Body.Close()
+
+	fmt.Println("response Status:", resp.Status)
+	fmt.Println("response Headers:", resp.Header)
+	body, _ := ioutil.ReadAll(resp.Body)
+	fmt.Println("response Body:", string(body))
+	return shim.Success([]byte(string(body)))
 }
 
 
@@ -1074,4 +1189,80 @@ func changeStateToAcception(stub shim.ChaincodeStubInterface, Task string) (stri
 	}
 
 	return state
+}
+
+
+// =================================================================
+//        NewIdWorker - new a snowflake id generator object.
+// =================================================================
+func NewIdWorker(NodeId int64) (*IdWorker, error) {
+   var districtId int64
+   districtId = 1
+   idWorker := &IdWorker{}
+   if NodeId > maxNodeId || NodeId < 0 {
+      fmt.Sprintf("NodeId Id can't be greater than %d or less than 0", maxNodeId)
+      return nil, errors.New(fmt.Sprintf("NodeId Id: %d error", NodeId))
+   }
+   if districtId > maxDistrictId || districtId < 0 {
+      fmt.Sprintf("District Id can't be greater than %d or less than 0", maxDistrictId)
+      return nil, errors.New(fmt.Sprintf("District Id: %d error", districtId))
+   }
+   idWorker.nodeId = NodeId
+   idWorker.districtId = districtId
+   idWorker.lastTimestamp = -1
+   idWorker.sequence = 0
+   idWorker.twepoch = twepoch
+   idWorker.mutex = sync.Mutex{}
+   fmt.Sprintf("worker starting. timestamp left shift %d, District id bits %d, worker id bits %d, sequence bits %d, workerid %d", timestampLeftShift, DistrictIdBits, NodeIdBits, sequenceBits, NodeId)
+   return idWorker, nil
+}
+
+
+// =====================================================
+//        timeGen - generate a unix millisecond.
+// =====================================================
+func timeGen() int64 {
+   return time.Now().UnixNano() / int64(time.Millisecond)
+}
+
+
+// ==========================================================
+//      tilNextMillis - spin wait till next millisecond.
+// ==========================================================
+func tilNextMillis(lastTimestamp int64) int64 {
+   timestamp := timeGen()
+   for timestamp <= lastTimestamp {
+      timestamp = timeGen()
+   }
+   return timestamp
+}
+
+
+// ============================================
+//      NextId - get a snowflake id.
+// ============================================
+func (id *IdWorker) NextId() (int64, error) {
+   id.mutex.Lock()
+   defer id.mutex.Unlock()
+   return id.nextid()
+}
+
+
+func (id *IdWorker) nextid() (int64, error) {
+   timestamp := timeGen()
+   if timestamp < id.lastTimestamp {
+      return 0, errors.New(fmt.Sprintf("Clock moved backwards.  Refusing to generate id for %d milliseconds", id.lastTimestamp-timestamp))
+   }
+
+   if id.lastTimestamp == timestamp {
+      id.sequence = (id.sequence + 1) & sequenceMask
+      if id.sequence == 0 {
+         timestamp = tilNextMillis(id.lastTimestamp)
+      }
+   } else {
+      id.sequence = 0
+   }
+
+   id.lastTimestamp = timestamp
+   return ((timestamp - id.twepoch) << timestampLeftShift) | (id.districtId << DistrictIdShift) | (id.nodeId << nodeIdShift) | id.sequence, nil
 }
