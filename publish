@@ -99,6 +99,24 @@ func (t *PublishChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response 
 }
 
 
+func (t *PublishChaincode) generateTaskId(stub shim.ChaincodeStubInterface) pb.Response {
+	var idStr string
+
+	iw, err := NewIdWorker(1)
+	if err!= nil {
+		fmt.Println(err)
+	}
+
+	if id, err := iw.NextId(); err != nil {
+		fmt.Println(err)
+	} else {
+		idStr = strconv.FormatInt(id, 10)
+	}
+
+	return shim.Success([]byte(idStr))
+}
+
+
 // ===================================================
 //      addTask - add tasks from chaincode state
 // ===================================================
@@ -153,24 +171,6 @@ func (t *PublishChaincode) addTask(stub shim.ChaincodeStubInterface, args []stri
   fmt.Println("add task successfully", taskId)
   fmt.Println("- end add task\n")
 	return shim.Success(idByte)
-}
-
-
-func (t *PublishChaincode) generateTaskId(stub shim.ChaincodeStubInterface) pb.Response {
-	var idStr string
-
-	iw, err := NewIdWorker(1)
-	if err!= nil {
-		fmt.Println(err)
-	}
-
-	if id, err := iw.NextId(); err != nil {
-		fmt.Println(err)
-	} else {
-		idStr = strconv.FormatInt(id, 10)
-	}
-
-	return shim.Success([]byte(idStr))
 }
 
 
